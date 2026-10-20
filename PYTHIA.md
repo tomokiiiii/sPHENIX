@@ -1,6 +1,6 @@
 # Pythia pp simulation から SiEmcalTopoTree を作る
 
-この文書は MDC2 Pythia pp DST から `SiEmcalTopoTree` を作るまでを説明します。Machine Learning の学習・評価は [`ElectronSeparation_MachineLearning/README.ja.md`](../ElectronSeparation_MachineLearning/README.ja.md) に分離しています。
+この文書は MDC2 Pythia pp DST から `SiEmcalTopoTree` を作るまでを説明します。Machine Learning の学習・評価は [`ElectronSeparation_MachineLearning/README.ja.md`](MachineLearning.md) に分離しています。
 
 ## 先に結論
 
