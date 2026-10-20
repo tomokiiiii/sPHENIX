@@ -2,11 +2,11 @@
 
 この directory の simulation と `SiEmcalTopoTree` 作成手順は、入力 sample ごとに分けています。
 
-- [Pythia pp simulation からの作成](README_PYTHIA.ja.md)
-- [single-particle gun simulation からの作成](README_SINGLEGUN.ja.md)
+- [Pythia pp simulation からの作成](PYTHIA.md)
+- [single-particle gun simulation からの作成](SingleGunSim.md)
 
 ElectronClassifier の学習・評価・filter・plot は、別 repository の
-[`ElectronSeparation_MachineLearning/README.ja.md`](../ElectronSeparation_MachineLearning/README.ja.md)
+[`ElectronSeparation_MachineLearning/README.ja.md`](MachineLearning.md)
 を参照してください。この README 群では、ML に渡す ROOT file が作られるまでだけを説明します。
 
 ## 現在の使い分け
