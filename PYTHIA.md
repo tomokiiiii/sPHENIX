@@ -1,6 +1,6 @@
 # Pythia pp simulation から SiEmcalTopoTree を作る
 
-この文書は MDC2 Pythia pp DST から `SiEmcalTopoTree` を作るまでを説明します。Machine Learning の学習・評価は [`ElectronSeparation_MachineLearning/README.ja.md`](MachineLearning.md) に分離しています。
+この文書は MDC2 Pythia pp DST から `SiEmcalTopoTree` を作るまでを説明します。Machine Learning の学習・評価は [`ElectronSeparation_MachineLearning/README.ja.md`](../ElectronSeparation_MachineLearning/README.ja.md) に分離しています。
 
 ## 先に結論
 
@@ -172,15 +172,104 @@ pT = 0.21 * signed_bending_angle^(-0.986)
 | `truthTree` | truth particle と CEMC entrance position | [L322--352](SiliconSeedAna/SiliconSeedsAna.cc#L322) |
 | `TopoClusTree` | all-calorimeter topo cluster と tower | [L356--386](SiliconSeedAna/SiliconSeedsAna.cc#L356) |
 
-### Reconstructed track と truth の対応
+## Truth情報を持ってくる処理の詳細
 
-`SvtxTrackEval::max_truth_particle_by_nclusters()` を使い、その reco track に最も多く cluster を与えた truth particle を選びます（[`SiliconSeedsAna.cc` L647--653](SiliconSeedAna/SiliconSeedsAna.cc#L647)、[L815--840](SiliconSeedAna/SiliconSeedsAna.cc#L815)）。その truth track ID を `track_id_truth` に保存します。
+truthは一度に一か所から取得しているのではなく、次の複数の情報源を最後にtrack IDでjoinしています。
 
-### Truth CEMC entrance position
+```text
+G4TruthInfo -> 全truth particleの生成時情報 --------- truth_id
+                                                       |
+tracker hit/cluster truth association -> reco track -> track_id_truth
+                                                       |
+G4HIT_CEMC -> 同じG4 track IDの最内周endpoint -------+
+                                                       |
+make_SiEmcalTopoTree_v4.C: truth_id == track_id_truth でjoin
+```
 
-`G4HIT_CEMC` を truth track ID ごとに調べ、hit の入口と出口の両方を候補にして、原点からの半径が最小の点を CEMC の最初の到達位置として保存します（[`SiliconSeedsAna.cc` L446--511](SiliconSeedAna/SiliconSeedsAna.cc#L446)）。
+### 1. Pythia DSTのどのstreamから読むか
 
-その後 `G4TruthInfo` の particle を走査し、同じ track ID の `truth_cemc_x/y/z/t` を truth particle に結合します（L534--601）。これは **同じ Geant4 track ID の直接対応**であり、shower daughter を自動で parent particle にまとめる処理ではありません。
+Pythia版ではtruth関係だけでも二種類のinputを使います。
+
+- `g4hits/.../G4Hits_pythia8_Detroit-*.root`: `G4TruthInfo`、`G4HIT_CEMC`などのGeant4 particle/hit nodeを供給。
+- `nopileup/trkrhit/.../DST_TRUTH_pythia8_Detroit-*.root`とtracker hit/cluster stream: reco clusterとGeant4 hitのassociationを供給。
+
+filenameの組み立ては [`Positionv5.C` L125--152](dstmacro/sim/Fun4All_PYTHIA_SiliconRecoPositionv5.C#L125)、input managerへの登録は [L222--249](dstmacro/sim/Fun4All_PYTHIA_SiliconRecoPositionv5.C#L222) です。`build_truthreco_tables()` をanalyzerより先に登録し、truth/reco evaluatorが必要とする対応表を準備します（[L331--334](dstmacro/sim/Fun4All_PYTHIA_SiliconRecoPositionv5.C#L331)）。
+
+`SiliconSeedsAna::setMC(true)` は既定で `doEval=true` も設定します（[`SiliconSeedsAna.h` L95](SiliconSeedAna/SiliconSeedsAna.h#L95)）。したがって `InitRun()` で `SvtxEvalStack` が作られ、`truthTree`とtrack truth matchingの両方が有効になります（[`SiliconSeedsAna.cc` L254--263](SiliconSeedAna/SiliconSeedsAna.cc#L254)）。
+
+### 2. `G4TruthInfo`から保存するparticle
+
+各eventの最初に `findNode::getClass<PHG4TruthInfoContainer>(topNode, "G4TruthInfo")` でcontainerを取得します（[`SiliconSeedsAna.cc` L446--453](SiliconSeedAna/SiliconSeedsAna.cc#L446)）。nodeがなければ、そのeventでは`truthTree->Fill()`まで到達せずtruth entryを作りません。
+
+particle loopは`GetPrimaryParticleRange()`ではなく **`GetParticleRange()`** を使うため、primaryだけでなくsecondaryも対象です（[L533--538](SiliconSeedAna/SiliconSeedsAna.cc#L533)）。現在の選別はproduction vertexの横方向半径
+
+```text
+vertex_r = sqrt(vertex_x^2 + vertex_y^2) <= 5 cm
+```
+
+だけです（L540--547）。PID、pT、eta、primary/secondaryによるcutはありません。保存するvectorは次の通りで、同じindexが同じtruth particleを表します（[L567--601](SiliconSeedAna/SiliconSeedsAna.cc#L567)）。
+
+| branch | 出所・意味 |
+|---|---|
+| `truth_id` | `PHG4Particle::get_track_id()`。以降のjoin key |
+| `truth_pid` | PDG particle ID |
+| `truth_px/py/pz/e` | particleに保存された生成時4-momentum |
+| `truth_pt/eta/phi` | 上の4-momentumから計算 |
+| `truth_x/y/z`, `truth_vtxid` | `get_vtx_id()`から`GetVtx()`で取得した、このparticleのproduction vertex |
+| `truth_primary_id` | Geant4 recordのprimary ID |
+| `truth_parent_id` | Geant4 recordのparent track ID |
+
+`truth_vtx_x/y/z`は上記particle-aligned vectorとは別です。`GetPrimaryVtxRange()`を走査してprimary vertexだけを順に保存しますが、対応するvertex ID branchはありません（[L521--530](SiliconSeedAna/SiliconSeedsAna.cc#L521)）。particleごとのvertexには`truth_x/y/z`と`truth_vtxid`を使います。
+
+### 3. Reconstructed trackをtruth particleへ対応づける方法
+
+`processTrackMap()`でeventごとに`SvtxEvalStack::next_event()`を呼び、`SvtxTrackEval`を取得します（[`SiliconSeedsAna.cc` L647--653](SiliconSeedAna/SiliconSeedsAna.cc#L647)）。各reco trackに対して次の二段階を要求します。
+
+1. `max_truth_particle_by_nclusters(track)`で、そのreco trackに最も多くtracker clusterを寄与したtruth particleを選ぶ。
+2. `best_track_from(g4particle_match)`でtruth側から最良reco trackを逆引きし、そのtrack IDが現在処理中のreco track IDと一致することを確認する。
+
+両方を通った場合だけ、`get_track_id()`を`track_id_truth`、`get_pid()`を`track_truth_pid`に保存します（[`SiliconSeedsAna.cc` L807--841](SiliconSeedAna/SiliconSeedsAna.cc#L807)）。つまり単なる最近接position matchingではなく、tracker cluster truth associationに基づく相互確認付きmatchingです。
+
+対応が見つからない場合、analyzer ROOTでは`track_id_truth = std::numeric_limits<int>::max()`、`track_truth_pid = 0`です。flat converterは`track_truth_pid`をそのまま採用せず、`track_id_truth`を使って`truthTree`を引き直します。
+
+### 4. Truth CEMC entrance position
+
+`truth_cemc_*`は、reco EMCal clusterの位置分解能とCEMC到達時momentumに対するpT resolutionを測るために追加したreferenceです。
+
+`G4HIT_CEMC`を全走査し、`PHG4Hit::get_trkid()`をkeyとするmapを先に作ります（[`SiliconSeedsAna.cc` L468--485](SiliconSeedAna/SiliconSeedsAna.cc#L468)）。同じG4 track IDに属するhit数を`truth_cemc_nhits`として数えます。
+
+各hitについてendpoint 0と1の両方を調べ、有限値の候補のうち **円筒半径 `r = hypot(x,y)` が最小のendpoint** をentranceとして採用します（L488--511）。したがって、これは次のいずれでもありません。
+
+- 最小timeのhit
+- 最大energy depositのhit
+- reco EMCal clusterのtruth contributor
+- helixをEMCal面へ外挿したposition
+
+選ばれたendpointから`x/y/z/r/t`と`px/py/pz`を保存し、`phi = atan2(y,x)`、position etaを`asinh(z/r)`で計算します。この`truth_cemc_eta`はmomentum etaではなく、原点からendpointを見た幾何学的etaです。位置分解能には`calo_phi - truth_cemc_phi`、`calo_z - truth_cemc_z`などを使えます。`truth_pt`が生成時pTなのに対し、`truth_cemc_pt = hypot(truth_cemc_px, truth_cemc_py)`はmaterial中のenergy lossやscattering後、CEMCへ入った瞬間のpTです。CEMC入口基準のpT resolutionには後者を使います。
+
+#### 既存のresolution plotでの使い方
+
+- [`plot_EMCalPhiResolution_v4.C` L55--153](analysiscode_bymyself/plot_EMCalPhiResolution_v4.C#L55) は `truth_cemc_valid` を要求し、`emcal_truth_dphi = calo_phi - truth_cemc_phi` の分布幅をposition resolutionとして測ります。pT binは現在、生成時`truth_pt`で切っています。
+- [`plot_SiEmcalPtResolution_withTheory_v3.C` L189--230](analysiscode_bymyself/plot_SiEmcalPtResolution_withTheory_v3.C#L189) の直接的なpT residualは `(track_pt - truth_pt)/truth_pt` と `(calo_pt - truth_pt)/truth_pt` です。
+- 同macroは別途`emcal_truth_dphi`のsigmaを測り、経験式のbending angleを使って `sigma(pT)/pT ~= 0.986 * sigma(phi) / bending_angle` に伝播します（[L345--380](analysiscode_bymyself/plot_SiEmcalPtResolution_withTheory_v3.C#L345)）。つまり現在のplotでは`truth_cemc`位置を、position termがpT resolutionへ与える寄与の予測に使っています。
+- `truth_cemc_pt` branchはCEMC入口pTを直接referenceにする比較にも使えますが、上記の既存pT plotの分母は`truth_cemc_pt`ではなく`truth_pt`です。
+
+その後、`G4TruthInfo`で保持した各particleの`truth_id`とCEMC hitの`trkid`を **完全一致** でjoinします（[L585--601](SiliconSeedAna/SiliconSeedsAna.cc#L585)）。有効endpointを持つ一致hitがあれば`truth_cemc_valid=1`です。同じtrack IDのhit自体がなければ`valid=0`, `nhits=0`でposition/momentum/timeは`NaN`です。hitは存在しても両endpointが非有限値なら、まれに`valid=0`かつ`nhits>0`になり得ます。parentや`primary_id`への繰り上げはしないため、primary electronがCEMC到達前にsecondaryを作り、そのdaughterだけがCEMCへ入った場合、そのhitはprimary electronには加算されません。
+
+### 5. Flat treeでの最終joinと欠損値
+
+`make_SiEmcalTopoTree_v4.C`はeventごとに`truth_id -> truthTree vector index`のmapを作り（[`make...v4.C` L500--503](macros/make_SiEmcalTopoTree_v4.C#L500)）、各reco trackの`track_id_truth`をkeyに検索します（[L626--669](macros/make_SiEmcalTopoTree_v4.C#L626)）。このため、track evaluatorでmatchしていても、そのtruth particleが`vertex_r > 5 cm`で`truthTree`から除かれていればflat treeではtruth未対応になります。
+
+未対応時のflat-tree値は`truth_pid/truth_pt/truth_cemc_* = -9999`、`truth_cemc_valid=0`、`truth_cemc_nhits=0`です（[`make...v4.C` L15](macros/make_SiEmcalTopoTree_v4.C#L15)、[L614--625](macros/make_SiEmcalTopoTree_v4.C#L614)）。`truth_cemc_valid=1`の場合だけ、次を計算します（[L670--678](macros/make_SiEmcalTopoTree_v4.C#L670)）。
+
+```text
+truth_cemc_pt                 = hypot(truth_cemc_px, truth_cemc_py)
+emcal_truth_dphi              = wrap(calo_phi - truth_cemc_phi)
+emcal_truth_ds_at_truth_r     = truth_cemc_r * emcal_truth_dphi
+emcal_truth_ds_at_cluster_r   = 104 cm * emcal_truth_dphi
+```
+
+v4 converterは`truth_cemc_*` branchが一つでも不足すると変換を中止し、更新済み`SiliconSeedsAna`でanalyzer ROOTを再生成するようerrorを出します（[`make...v4.C` L319--359](macros/make_SiEmcalTopoTree_v4.C#L319)）。
 
 ### EMCal cluster
 
